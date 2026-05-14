@@ -6,6 +6,7 @@ use App\Models\Expense;
 use App\Models\Task;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 
 class AgentActionService
 {
@@ -48,18 +49,38 @@ class AgentActionService
         }
 
         if ($this->looksLikeDoubleUrl($webhookUrl)) {
-            Log::warning('N8N webhook URL looks malformed.');
+            Log::warning('N8N webhook URL looks malformed.', [
+                'url' => $this->sanitizeWebhookUrl($webhookUrl),
+            ]);
             return $this->reply('URL n8n terlihat tidak valid. Cek konfigurasi dulu ya.');
         }
 
-        $response = Http::timeout(15)
-            ->asJson()
-            ->post($webhookUrl, [
-                'source' => 'Telegram Kobi',
-                'user' => 'Rain',
-                'task' => $taskContent,
-                'timestamp' => now()->toDateTimeString(),
+        Log::info('Sending task to N8N webhook.', [
+            'url' => $this->sanitizeWebhookUrl($webhookUrl),
+        ]);
+
+        try {
+            $response = Http::timeout(45)
+                ->asJson()
+                ->post($webhookUrl, [
+                    'source' => 'Telegram Kobi',
+                    'user' => 'Rain',
+                    'task' => $taskContent,
+                    'timestamp' => now()->toDateTimeString(),
+                ]);
+        } catch (\Throwable $exception) {
+            Log::error('N8N webhook request exception.', [
+                'url' => $this->sanitizeWebhookUrl($webhookUrl),
+                'error' => $exception->getMessage(),
             ]);
+
+            return $this->reply('Waduh, markas n8n sepertinya sedang sibuk atau tidak bisa dihubungi nih.');
+        }
+
+        Log::info('N8N webhook response received.', [
+            'status' => $response->status(),
+            'body' => Str::limit((string) $response->body(), 500),
+        ]);
 
         if ($response->successful()) {
             return $this->reply(
@@ -70,6 +91,8 @@ class AgentActionService
 
         Log::warning('N8N webhook request failed.', [
             'status' => $response->status(),
+            'body' => Str::limit((string) $response->body(), 500),
+            'url' => $this->sanitizeWebhookUrl($webhookUrl),
         ]);
 
         return $this->reply('Waduh, markas n8n sepertinya sedang sibuk atau tidak bisa dihubungi nih.');
@@ -136,6 +159,27 @@ class AgentActionService
         $count = substr_count($url, 'http://') + substr_count($url, 'https://');
 
         return $count > 1;
+    }
+
+    private function sanitizeWebhookUrl(string $url): string
+    {
+        $parts = parse_url($url);
+
+        if ($parts === false) {
+            return '[invalid-url]';
+        }
+
+        $scheme = $parts['scheme'] ?? 'https';
+        $host = $parts['host'] ?? '';
+        $port = isset($parts['port']) ? ':' . $parts['port'] : '';
+        $path = $parts['path'] ?? '';
+
+        if ($host === '') {
+            $clean = preg_replace('/[?#].*/', '', $url);
+            return $clean ?: '[invalid-url]';
+        }
+
+        return $scheme . '://' . $host . $port . $path;
     }
 
     private function reply(string $text, ?string $parseMode = null): array

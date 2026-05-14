@@ -5,6 +5,9 @@ $frontendOrigins = array_filter(array_map(
     explode(',', (string) env('FRONTEND_URL', ''))
 ));
 
+$environment = env('APP_ENV', 'production');
+$isProduction = in_array($environment, ['production', 'staging'], true);
+
 return [
 
     /*
@@ -24,11 +27,18 @@ return [
 
     'allowed_methods' => ['*'],
 
-    'allowed_origins' => $frontendOrigins ?: ['*'],
+    'allowed_origins' => $frontendOrigins ?: ($isProduction ? [] : ['*']),
 
     'allowed_origins_patterns' => [],
 
-    'allowed_headers' => ['*'],
+    'allowed_headers' => [
+        'Content-Type',
+        'X-Requested-With',
+        'Authorization',
+        'X-KOBI-KEY',
+        'Accept',
+        'Origin',
+    ],
 
     'exposed_headers' => [],
 

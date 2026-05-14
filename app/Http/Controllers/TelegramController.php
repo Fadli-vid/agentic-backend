@@ -17,6 +17,31 @@ class TelegramController extends Controller
         $text = $request->input('message.text');
 
         if ($chatId && $text) {
+            if (str_starts_with(strtolower($text), '/task ')) {
+                $taskContent = substr($text, 6);
+
+                $response = Http::post(env('N8N_WEBHOOK_URL'), [
+                    'source' => 'Telegram Kobi',
+                    'user' => 'Rain',
+                    'task' => $taskContent,
+                    'timestamp' => now()->toDateTimeString()
+                ]);
+
+                if ($response->successful()) {
+                    $balasan = "Siap! Tugas otomatisasi: *$taskContent* sudah Kobi lempar ke markas n8n! 🚀🤖";
+                } else {
+                    $balasan = 'Waduh, markas n8n sepertinya sedang sibuk atau tidak bisa dihubungi nih. 😅';
+                }
+
+                Http::post('https://api.telegram.org/bot' . env('TELEGRAM_BOT_TOKEN') . '/sendMessage', [
+                    'chat_id' => $chatId,
+                    'text' => $balasan,
+                    'parse_mode' => 'Markdown'
+                ]);
+
+                return response()->json(['status' => 'success']);
+            }
+
             $telegramToken = env('TELEGRAM_BOT_TOKEN');
             $geminiKey = env('GEMINI_API_KEY');
 
@@ -44,9 +69,12 @@ class TelegramController extends Controller
                 ]);
 
             // Cek jika Gemini gagal merespons
-            if (!$response->successful()) {
-                Log::error('Gemini API Error: ' . $response->body());
-                $this->sendTelegramMessage($chatId, $telegramToken, 'Maaf, koneksi otak Kobi ke Gemini sedang terputus.');
+           if (!$response->successful()) {
+                // Kita ambil pesan error asli dari Google dan kirim langsung ke Telegram!
+                $googleError = substr($response->body(), 0, 200); // Ambil 200 huruf pertama
+                $pesanError = "Waduh, Google Gemini nolak nih. Katanya: " . $response->status() . " - " . $googleError;
+                
+                $this->sendTelegramMessage($chatId, $telegramToken, $pesanError);
                 return response()->json(['status' => 'error']);
             }
 

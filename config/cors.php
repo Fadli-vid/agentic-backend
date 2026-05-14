@@ -1,9 +1,17 @@
 <?php
 
-$frontendOrigins = array_filter(array_map(
-    'trim',
+$frontendOrigins = array_values(array_filter(array_map(
+    static function ($origin) {
+        $origin = trim($origin);
+
+        if ($origin === '') {
+            return '';
+        }
+
+        return rtrim($origin, '/');
+    },
     explode(',', (string) env('FRONTEND_URL', ''))
-));
+)));
 
 $environment = env('APP_ENV', 'production');
 $isProduction = in_array($environment, ['production', 'staging'], true);

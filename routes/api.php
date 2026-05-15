@@ -81,3 +81,25 @@ Route::middleware('kobi.key')->group(function () {
         return response()->json(['deleted' => true]);
     });
 });
+
+use App\Services\TelegramService;
+
+Route::get('/test-telegram', function (TelegramService $telegramService) {
+    $chatId = request('chat_id');
+
+    if (!$chatId) {
+        return response()->json([
+            'ok' => false,
+            'message' => 'chat_id is required',
+        ], 400);
+    }
+
+    $sent = $telegramService->sendMessage(
+        $chatId,
+        'Tes langsung dari Laravel ke Telegram ✅'
+    );
+
+    return response()->json([
+        'ok' => $sent,
+    ]);
+});

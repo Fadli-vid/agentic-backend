@@ -12,12 +12,12 @@ class TelegramService
         $token = env('TELEGRAM_BOT_TOKEN');
 
         if (!$token) {
-            Log::warning('Telegram bot token is not configured.');
+            Log::error('TELEGRAM_BOT_TOKEN is not set.');
             return false;
         }
 
         $payload = [
-            'chat_id' => $chatId,
+            'chat_id' => (string) $chatId,
             'text' => $text,
         ];
 
@@ -26,32 +26,24 @@ class TelegramService
         }
 
         try {
-            $response = Http::timeout(15)
-                ->withoutVerifying()
-                ->asJson()
+            $response = Http::timeout(30)
                 ->post("https://api.telegram.org/bot{$token}/sendMessage", $payload);
-        } catch (\Throwable $exception) {
-            Log::error('Telegram API sendMessage exception.', [
-                'error' => $exception->getMessage(),
-            ]);
 
-            return false;
-        }
-
-        Log::info('Telegram API sendMessage response.', [
-            'status' => $response->status(),
-            'successful' => $response->successful(),
-            'body' => substr((string) $response->body(), 0, 500),
-        ]);
-
-        if (!$response->successful()) {
-            Log::warning('Telegram API sendMessage failed.', [
+            Log::info('Telegram sendMessage response.', [
                 'status' => $response->status(),
+                'successful' => $response->successful(),
+                'body' => substr($response->body(), 0, 500),
+            ]);
+
+            return $response->successful();
+        } catch (\Throwable $exception) {
+            Log::error('Telegram sendMessage exception.', [
+                'error' => $exception->getMessage(),
+                'file' => $exception->getFile(),
+                'line' => $exception->getLine(),
             ]);
 
             return false;
         }
-
-        return true;
     }
 }

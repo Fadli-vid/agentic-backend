@@ -25,9 +25,17 @@ class TelegramService
             $payload['parse_mode'] = $parseMode;
         }
 
-        $response = Http::timeout(15)
-            ->asJson()
-            ->post("https://api.telegram.org/bot{$token}/sendMessage", $payload);
+        try {
+            $response = Http::timeout(15)
+                ->asJson()
+                ->post("https://api.telegram.org/bot{$token}/sendMessage", $payload);
+        } catch (\Throwable $exception) {
+            Log::error('Telegram API sendMessage exception.', [
+                'error' => $exception->getMessage(),
+            ]);
+
+            return false;
+        }
 
         if (!$response->successful()) {
             Log::warning('Telegram API sendMessage failed.', [

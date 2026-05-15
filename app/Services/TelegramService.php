@@ -7,7 +7,7 @@ use Illuminate\Support\Facades\Log;
 
 class TelegramService
 {
-    public function sendMessage(string $chatId, string $text, ?string $parseMode = null): bool
+    public function sendMessage(string|int $chatId, string $text, ?string $parseMode = null): bool
     {
         $token = env('TELEGRAM_BOT_TOKEN');
 
@@ -36,6 +36,12 @@ class TelegramService
 
             return false;
         }
+
+        Log::info('Telegram API sendMessage response.', [
+            'status' => $response->status(),
+            'successful' => $response->successful(),
+            'body' => substr((string) $response->body(), 0, 500),
+        ]);
 
         if (!$response->successful()) {
             Log::warning('Telegram API sendMessage failed.', [

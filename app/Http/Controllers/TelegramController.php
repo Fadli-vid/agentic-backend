@@ -26,12 +26,28 @@ class TelegramController extends Controller
             set_time_limit(120);
 
             $payload = $request->all();
-            $chatId = data_get($payload, 'message.chat.id');
-            $text = data_get($payload, 'message.text');
 
-            Log::info('Telegram webhook received.', [
-                'has_chat_id' => (bool) $chatId,
-                'has_text' => $text !== null,
+            Log::info('Telegram raw payload.', [
+                'payload' => $payload,
+            ]);
+
+            $message = $payload['message']
+                ?? $payload['edited_message']
+                ?? $payload['channel_post']
+                ?? data_get($payload, 'callback_query.message');
+
+            $chatId = data_get($message, 'chat.id');
+            $text = data_get($message, 'text');
+            $hasMessage = $message !== null;
+
+            if ($chatId !== null) {
+                $chatId = (string) $chatId;
+            }
+
+            Log::info('Telegram parsed payload.', [
+                'chat_id' => $chatId,
+                'text' => $text,
+                'has_message' => $hasMessage,
             ]);
 
             if (!$chatId || $text === null) {
@@ -45,7 +61,7 @@ class TelegramController extends Controller
             }
 
             Log::info('Service resolving started.', [
-                'chat_id' => (string) $chatId,
+                'chat_id' => $chatId,
             ]);
 
             try {
@@ -55,6 +71,19 @@ class TelegramController extends Controller
                 Log::error('Failed to resolve TelegramService.', [
                     'error' => $exception->getMessage(),
                 ]);
+
+                return response()->json(['status' => 'success'], 200);
+            }
+
+            $testReplyEnabled = filter_var(env('KOBI_WEBHOOK_TEST_REPLY', false), FILTER_VALIDATE_BOOLEAN);
+
+            if ($testReplyEnabled) {
+                $this->safeSendTelegramMessage(
+                    $telegramService,
+                    $chatId,
+                    'Webhook masuk, text terbaca, dan TelegramService aktif ✅',
+                    null
+                );
 
                 return response()->json(['status' => 'success'], 200);
             }
@@ -70,7 +99,7 @@ class TelegramController extends Controller
 
             $event = $this->safeCreateAgentEvent(
                 $agentEventService,
-                (string) $chatId,
+                $chatId,
                 $text,
                 $this->resolveUserName($payload)
             );
@@ -339,25 +368,45 @@ class TelegramController extends Controller
 
     private function safeSendTelegramMessage(
         ?TelegramService $telegramService,
-        ?string $chatId,
+        string|int|null $chatId,
         string $text,
         ?string $parseMode = null
     ): bool {
         if (!$telegramService) {
             Log::warning('TelegramService is not available.');
+            Log::info('Telegram message sent.', [
+                'chat_id' => $chatId,
+                'sent' => false,
+            ]);
             return false;
         }
 
         if (!$chatId) {
             Log::warning('Telegram chat_id is missing.');
+            Log::info('Telegram message sent.', [
+                'chat_id' => $chatId,
+                'sent' => false,
+            ]);
             return false;
         }
 
         try {
-            return $telegramService->sendMessage($chatId, $text, $parseMode);
+            $sent = $telegramService->sendMessage($chatId, $text, $parseMode);
+
+            Log::info('Telegram message sent.', [
+                'chat_id' => $chatId,
+                'sent' => $sent,
+            ]);
+
+            return $sent;
         } catch (\Throwable $exception) {
             Log::error('Failed to send Telegram message.', [
                 'error' => $exception->getMessage(),
+            ]);
+
+            Log::info('Telegram message sent.', [
+                'chat_id' => $chatId,
+                'sent' => false,
             ]);
 
             return false;
@@ -413,14 +462,22 @@ class TelegramController extends Controller
 
     private function resolveUserName(array $payload): ?string
     {
-        $username = trim((string) data_get($payload, 'message.from.username'));
+        $from = data_get($payload, 'message.from')
+            ?? data_get($payload, 'edited_message.from')
+            ?? data_get($payload, 'callback_query.from');
+
+        if (!is_array($from)) {
+            return null;
+        }
+
+        $username = trim((string) ($from['username'] ?? ''));
 
         if ($username !== '') {
             return $username;
         }
 
-        $firstName = trim((string) data_get($payload, 'message.from.first_name'));
-        $lastName = trim((string) data_get($payload, 'message.from.last_name'));
+        $firstName = trim((string) ($from['first_name'] ?? ''));
+        $lastName = trim((string) ($from['last_name'] ?? ''));
 
         $fullName = trim($firstName . ' ' . $lastName);
 

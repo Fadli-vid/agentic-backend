@@ -8,6 +8,7 @@ use App\Services\AgentEventService;
 use App\Services\GeminiService;
 use App\Services\TelegramService;
 use App\Models\AgentEvent;
+use Illuminate\Support\Facades\Log;
 
 class TelegramController extends Controller
 {
@@ -27,6 +28,11 @@ class TelegramController extends Controller
         $chatId = data_get($payload, 'message.chat.id');
         $text = data_get($payload, 'message.text');
 
+        Log::info('Telegram webhook received.', [
+            'has_chat_id' => (bool) $chatId,
+            'has_text' => $text !== null,
+        ]);
+
         if (!$chatId || $text === null) {
             return response()->json(['status' => 'success']);
         }
@@ -37,74 +43,152 @@ class TelegramController extends Controller
             return response()->json(['status' => 'success']);
         }
 
-        $userName = $this->resolveUserName($payload);
-        $event = $this->agentEventService->createReceivedFromTelegram((string) $chatId, $text, $userName);
+        $event = null;
 
-        $n8nReply = $this->agentActionService->handleN8nCommand($text, $event);
+        try {
+            $userName = $this->resolveUserName($payload);
+            $event = $this->agentEventService->createReceivedFromTelegram((string) $chatId, $text, $userName);
 
-        if ($n8nReply) {
-            $event->update([
-                'action' => 'task_command',
-                'payload' => [
-                    'command' => 'task',
-                    'text' => $text,
-                ],
+            Log::info('Agent event created.', [
+                'event_id' => $event->id,
+            ]);
+        } catch (\Throwable $exception) {
+            Log::error('Failed to create agent event.', [
+                'error' => $exception->getMessage(),
+            ]);
+        }
+
+        try {
+            $n8nReply = null;
+
+            if (str_starts_with($text, '/')) {
+                $n8nReply = $this->agentActionService->handleN8nCommand($text, $event);
+            }
+
+            if ($n8nReply) {
+                if ($event) {
+                    $event->update([
+                        'action' => 'task_command',
+                        'payload' => [
+                            'command' => 'task',
+                            'text' => $text,
+                        ],
+                    ]);
+
+                    $this->finalizeEventFromAction($event, $n8nReply);
+                }
+
+                Log::info('Before Telegram reply (/task).', [
+                    'event_id' => $event?->id,
+                ]);
+
+                $this->telegramService->sendMessage(
+                    $chatId,
+                    $n8nReply['reply'] ?? 'Kobi sudah memproses pesanmu.',
+                    $n8nReply['parse_mode'] ?? null
+                );
+
+                return response()->json(['status' => 'success']);
+            }
+
+            if ($event) {
+                $this->agentEventService->markAnalyzing($event);
+            }
+
+            Log::info('Before Gemini.', [
+                'event_id' => $event?->id,
             ]);
 
-            $this->finalizeEventFromAction($event, $n8nReply);
+            $analysis = $this->geminiService->analyzeMessage($text);
+
+            Log::info('After Gemini.', [
+                'event_id' => $event?->id,
+                'action' => $analysis['action'] ?? null,
+                'ok' => $analysis['ok'] ?? false,
+            ]);
+
+            if (!($analysis['ok'] ?? false)) {
+                $status = $analysis['error_type'] ?? 'failed_ai';
+
+                if ($event) {
+                    $this->agentEventService->markFailed(
+                        $event,
+                        $status,
+                        $analysis['reply'] ?? 'AI error.',
+                        [
+                            'analysis' => $analysis,
+                        ]
+                    );
+                }
+
+                Log::info('Before Telegram reply (AI failed).', [
+                    'event_id' => $event?->id,
+                ]);
+
+                $this->telegramService->sendMessage(
+                    $chatId,
+                    $analysis['reply'] ?? 'Maaf, Kobi sedang mengalami kendala. Coba lagi ya.',
+                    $analysis['parse_mode'] ?? null
+                );
+
+                return response()->json(['status' => 'success']);
+            }
+
+            if ($event) {
+                $event->update([
+                    'action' => $analysis['action'] ?? null,
+                    'payload' => [
+                        'analysis' => $analysis,
+                    ],
+                ]);
+            }
+
+            Log::info('Before action execute.', [
+                'event_id' => $event?->id,
+                'action' => $analysis['action'] ?? null,
+            ]);
+
+            $actionReply = $this->agentActionService->execute($analysis, $event);
+
+            if ($event) {
+                $this->finalizeEventFromAction($event, $actionReply);
+            }
+
+            Log::info('Before Telegram reply.', [
+                'event_id' => $event?->id,
+            ]);
 
             $this->telegramService->sendMessage(
                 $chatId,
-                $n8nReply['reply'],
-                $n8nReply['parse_mode'] ?? null
+                $actionReply['reply'] ?? 'Kobi sudah memproses pesanmu.',
+                $actionReply['parse_mode'] ?? null
+            );
+
+            return response()->json(['status' => 'success']);
+        } catch (\Throwable $exception) {
+            Log::error('Telegram webhook processing failed.', [
+                'error' => $exception->getMessage(),
+            ]);
+
+            if ($event) {
+                $this->agentEventService->markFailed(
+                    $event,
+                    'failed_exception',
+                    $exception->getMessage(),
+                    [
+                        'hint' => 'Unhandled exception in webhook handler.',
+                    ]
+                );
+            }
+
+            $this->telegramService->sendMessage(
+                $chatId,
+                'Maaf, Kobi sedang mengalami kendala. Coba lagi ya.',
+                null
             );
 
             return response()->json(['status' => 'success']);
         }
-
-        $this->agentEventService->markAnalyzing($event);
-
-        $analysis = $this->geminiService->analyzeMessage($text);
-
-        if (!($analysis['ok'] ?? false)) {
-            $status = $analysis['error_type'] ?? 'failed_ai';
-
-            $this->agentEventService->markFailed(
-                $event,
-                $status,
-                $analysis['reply'] ?? 'AI error.',
-                [
-                    'analysis' => $analysis,
-                ]
-            );
-
-            $this->telegramService->sendMessage(
-                $chatId,
-                $analysis['reply'] ?? 'Maaf, Kobi sedang mengalami kendala. Coba lagi ya.',
-                $analysis['parse_mode'] ?? null
-            );
-
-            return response()->json(['status' => 'success']);
-        }
-
-        $event->update([
-            'action' => $analysis['action'] ?? null,
-            'payload' => [
-                'analysis' => $analysis,
-            ],
-        ]);
-
-        $actionReply = $this->agentActionService->execute($analysis, $event);
-
-        $this->finalizeEventFromAction($event, $actionReply);
-
-        $this->telegramService->sendMessage(
-            $chatId,
-            $actionReply['reply'],
-            $actionReply['parse_mode'] ?? null
-        );
-
-        return response()->json(['status' => 'success']);
     }
 
     private function finalizeEventFromAction(AgentEvent $event, array $actionReply): void

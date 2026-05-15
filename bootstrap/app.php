@@ -14,6 +14,7 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->alias([
             'kobi.key' => \App\Http\Middleware\KobiApiKeyMiddleware::class,
+            'n8n.key' => \App\Http\Middleware\N8nInternalKeyMiddleware::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {

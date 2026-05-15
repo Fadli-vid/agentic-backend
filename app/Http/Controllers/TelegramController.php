@@ -31,14 +31,13 @@ class TelegramController extends Controller
                 'payload' => $payload,
             ]);
 
-            $message = $payload['message']
-                ?? $payload['edited_message']
-                ?? $payload['channel_post']
+            $message = data_get($payload, 'message')
+                ?? data_get($payload, 'edited_message')
+                ?? data_get($payload, 'channel_post')
                 ?? data_get($payload, 'callback_query.message');
 
             $chatId = data_get($message, 'chat.id');
             $text = data_get($message, 'text');
-            $hasMessage = $message !== null;
 
             if ($chatId !== null) {
                 $chatId = (string) $chatId;
@@ -47,7 +46,7 @@ class TelegramController extends Controller
             Log::info('Telegram parsed payload.', [
                 'chat_id' => $chatId,
                 'text' => $text,
-                'has_message' => $hasMessage,
+                'has_message' => (bool) $message,
             ]);
 
             if (!$chatId || $text === null) {
@@ -336,7 +335,19 @@ class TelegramController extends Controller
         }
 
         try {
-            $this->finalizeEventFromAction($agentEventService, $event, $actionReply);
+            $status = $actionReply['status'] ?? 'completed';
+            $result = $actionReply['result'] ?? [];
+
+            if ($status !== 'completed') {
+                $agentEventService->markFailed(
+                    $event,
+                    $status,
+                    $actionReply['error_message'] ?? 'Action failed.',
+                    $result
+                );
+            } else {
+                $agentEventService->markCompleted($event, $result);
+            }
         } catch (\Throwable $exception) {
             Log::error('Failed to finalize agent event.', [
                 'event_id' => $event->id,
@@ -374,39 +385,19 @@ class TelegramController extends Controller
     ): bool {
         if (!$telegramService) {
             Log::warning('TelegramService is not available.');
-            Log::info('Telegram message sent.', [
-                'chat_id' => $chatId,
-                'sent' => false,
-            ]);
             return false;
         }
 
-        if (!$chatId) {
+        if (empty($chatId)) {
             Log::warning('Telegram chat_id is missing.');
-            Log::info('Telegram message sent.', [
-                'chat_id' => $chatId,
-                'sent' => false,
-            ]);
             return false;
         }
 
         try {
-            $sent = $telegramService->sendMessage($chatId, $text, $parseMode);
-
-            Log::info('Telegram message sent.', [
-                'chat_id' => $chatId,
-                'sent' => $sent,
-            ]);
-
-            return $sent;
+            return $telegramService->sendMessage((string) $chatId, $text, $parseMode);
         } catch (\Throwable $exception) {
             Log::error('Failed to send Telegram message.', [
                 'error' => $exception->getMessage(),
-            ]);
-
-            Log::info('Telegram message sent.', [
-                'chat_id' => $chatId,
-                'sent' => false,
             ]);
 
             return false;
@@ -436,28 +427,6 @@ class TelegramController extends Controller
             'parse_mode' => $actionReply['parse_mode'] ?? null,
             'error_message' => $actionReply['error_message'] ?? null,
         ];
-    }
-
-    private function finalizeEventFromAction(
-        AgentEventService $agentEventService,
-        AgentEvent $event,
-        array $actionReply
-    ): void {
-        $status = $actionReply['status'] ?? 'completed';
-        $result = $actionReply['result'] ?? [];
-
-        if ($status !== 'completed') {
-            $agentEventService->markFailed(
-                $event,
-                $status,
-                $actionReply['error_message'] ?? 'Action failed.',
-                $result
-            );
-
-            return;
-        }
-
-        $agentEventService->markCompleted($event, $result);
     }
 
     private function resolveUserName(array $payload): ?string

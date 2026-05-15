@@ -12,19 +12,15 @@ use Illuminate\Support\Facades\Log;
 
 class TelegramController extends Controller
 {
-    public function __construct(
-        private GeminiService $geminiService,
-        private TelegramService $telegramService,
-        private AgentActionService $agentActionService,
-        private AgentEventService $agentEventService
-    ) {
-    }
-
     public function handleWebhook(Request $request)
     {
         $chatId = null;
         $text = null;
         $event = null;
+        $telegramService = null;
+        $agentEventService = null;
+        $geminiService = null;
+        $agentActionService = null;
 
         try {
             set_time_limit(120);
@@ -48,14 +44,57 @@ class TelegramController extends Controller
                 return response()->json(['status' => 'success'], 200);
             }
 
+            Log::info('Service resolving started.', [
+                'chat_id' => (string) $chatId,
+            ]);
+
+            try {
+                $telegramService = app(TelegramService::class);
+                Log::info('TelegramService resolved.');
+            } catch (\Throwable $exception) {
+                Log::error('Failed to resolve TelegramService.', [
+                    'error' => $exception->getMessage(),
+                ]);
+
+                return response()->json(['status' => 'success'], 200);
+            }
+
+            try {
+                $agentEventService = app(AgentEventService::class);
+                Log::info('AgentEventService resolved.');
+            } catch (\Throwable $exception) {
+                Log::error('Failed to resolve AgentEventService.', [
+                    'error' => $exception->getMessage(),
+                ]);
+            }
+
             $event = $this->safeCreateAgentEvent(
+                $agentEventService,
                 (string) $chatId,
                 $text,
                 $this->resolveUserName($payload)
             );
 
+            try {
+                $agentActionService = app(AgentActionService::class);
+                Log::info('AgentActionService resolved.');
+            } catch (\Throwable $exception) {
+                Log::error('Failed to resolve AgentActionService.', [
+                    'error' => $exception->getMessage(),
+                ]);
+
+                $this->safeSendTelegramMessage(
+                    $telegramService,
+                    $chatId,
+                    'Maaf, Kobi sedang mengalami kendala. Coba lagi ya.',
+                    null
+                );
+
+                return response()->json(['status' => 'success'], 200);
+            }
+
             if ($this->isTaskCommand($text)) {
-                $n8nReply = $this->agentActionService->handleN8nCommand($text, $event);
+                $n8nReply = $agentActionService->handleN8nCommand($text, $event);
 
                 if ($n8nReply) {
                     $n8nReply = $this->normalizeActionReply($n8nReply);
@@ -70,8 +109,9 @@ class TelegramController extends Controller
                         ]);
                     }
 
-                    $this->safeFinalizeEvent($event, $n8nReply);
+                    $this->safeFinalizeEvent($agentEventService, $event, $n8nReply);
                     $this->safeSendTelegramMessage(
+                        $telegramService,
                         $chatId,
                         $n8nReply['reply'],
                         $n8nReply['parse_mode']
@@ -83,7 +123,7 @@ class TelegramController extends Controller
 
             if ($event) {
                 try {
-                    $this->agentEventService->markAnalyzing($event);
+                    $agentEventService?->markAnalyzing($event);
                 } catch (\Throwable $exception) {
                     Log::warning('Failed to mark event analyzing.', [
                         'event_id' => $event->id,
@@ -97,7 +137,25 @@ class TelegramController extends Controller
             ]);
 
             try {
-                $analysis = $this->geminiService->analyzeMessage($text);
+                $geminiService = app(GeminiService::class);
+                Log::info('GeminiService resolved.');
+            } catch (\Throwable $exception) {
+                Log::error('Failed to resolve GeminiService.', [
+                    'error' => $exception->getMessage(),
+                ]);
+
+                $this->safeSendTelegramMessage(
+                    $telegramService,
+                    $chatId,
+                    'Maaf, Kobi sedang mengalami kendala. Coba lagi ya.',
+                    null
+                );
+
+                return response()->json(['status' => 'success'], 200);
+            }
+
+            try {
+                $analysis = $geminiService->analyzeMessage($text);
             } catch (\Throwable $exception) {
                 Log::error('Gemini analysis failed.', [
                     'error' => $exception->getMessage(),
@@ -120,6 +178,7 @@ class TelegramController extends Controller
                 $status = $analysis['error_type'] ?? 'failed_ai';
 
                 $this->safeMarkFailed(
+                    $agentEventService,
                     $event,
                     $status,
                     $analysis['reply'] ?? 'AI error.',
@@ -129,6 +188,7 @@ class TelegramController extends Controller
                 );
 
                 $this->safeSendTelegramMessage(
+                    $telegramService,
                     $chatId,
                     $analysis['reply'] ?? 'Maaf, Kobi sedang mengalami kendala. Coba lagi ya.',
                     $analysis['parse_mode'] ?? null
@@ -152,7 +212,7 @@ class TelegramController extends Controller
             ]);
 
             try {
-                $actionReply = $this->agentActionService->execute($analysis, $event);
+                $actionReply = $agentActionService->execute($analysis, $event);
             } catch (\Throwable $exception) {
                 Log::error('Agent action failed.', [
                     'action' => $analysis['action'] ?? null,
@@ -168,9 +228,10 @@ class TelegramController extends Controller
             }
 
             $actionReply = $this->normalizeActionReply($actionReply);
-            $this->safeFinalizeEvent($event, $actionReply);
+            $this->safeFinalizeEvent($agentEventService, $event, $actionReply);
 
             $this->safeSendTelegramMessage(
+                $telegramService,
                 $chatId,
                 $actionReply['reply'],
                 $actionReply['parse_mode']
@@ -185,6 +246,7 @@ class TelegramController extends Controller
             ]);
 
             $this->safeMarkFailed(
+                $agentEventService,
                 $event,
                 'failed_exception',
                 $exception->getMessage(),
@@ -195,6 +257,7 @@ class TelegramController extends Controller
 
             if ($chatId) {
                 $this->safeSendTelegramMessage(
+                    $telegramService,
                     $chatId,
                     'Maaf, Kobi sedang mengalami kendala. Coba lagi ya.',
                     null
@@ -210,10 +273,18 @@ class TelegramController extends Controller
         return (bool) preg_match('/^\/task(\s|$)/i', trim($text));
     }
 
-    private function safeCreateAgentEvent(string $chatId, string $text, ?string $userName): ?AgentEvent
-    {
+    private function safeCreateAgentEvent(
+        ?AgentEventService $agentEventService,
+        string $chatId,
+        string $text,
+        ?string $userName
+    ): ?AgentEvent {
+        if (!$agentEventService) {
+            return null;
+        }
+
         try {
-            $event = $this->agentEventService->createReceivedFromTelegram($chatId, $text, $userName);
+            $event = $agentEventService->createReceivedFromTelegram($chatId, $text, $userName);
 
             Log::info('Agent event created.', [
                 'event_id' => $event->id,
@@ -229,14 +300,14 @@ class TelegramController extends Controller
         }
     }
 
-    private function safeFinalizeEvent(?AgentEvent $event, array $actionReply): void
+    private function safeFinalizeEvent(?AgentEventService $agentEventService, ?AgentEvent $event, array $actionReply): void
     {
-        if (!$event) {
+        if (!$event || !$agentEventService) {
             return;
         }
 
         try {
-            $this->finalizeEventFromAction($event, $actionReply);
+            $this->finalizeEventFromAction($agentEventService, $event, $actionReply);
         } catch (\Throwable $exception) {
             Log::error('Failed to finalize agent event.', [
                 'event_id' => $event->id,
@@ -245,14 +316,19 @@ class TelegramController extends Controller
         }
     }
 
-    private function safeMarkFailed(?AgentEvent $event, string $status, string $errorMessage, array $payload = []): void
-    {
-        if (!$event) {
+    private function safeMarkFailed(
+        ?AgentEventService $agentEventService,
+        ?AgentEvent $event,
+        string $status,
+        string $errorMessage,
+        array $payload = []
+    ): void {
+        if (!$event || !$agentEventService) {
             return;
         }
 
         try {
-            $this->agentEventService->markFailed($event, $status, $errorMessage, $payload);
+            $agentEventService->markFailed($event, $status, $errorMessage, $payload);
         } catch (\Throwable $exception) {
             Log::error('Failed to mark agent event failed.', [
                 'event_id' => $event->id,
@@ -261,15 +337,24 @@ class TelegramController extends Controller
         }
     }
 
-    private function safeSendTelegramMessage(?string $chatId, string $text, ?string $parseMode = null): bool
-    {
+    private function safeSendTelegramMessage(
+        ?TelegramService $telegramService,
+        ?string $chatId,
+        string $text,
+        ?string $parseMode = null
+    ): bool {
+        if (!$telegramService) {
+            Log::warning('TelegramService is not available.');
+            return false;
+        }
+
         if (!$chatId) {
             Log::warning('Telegram chat_id is missing.');
             return false;
         }
 
         try {
-            return $this->telegramService->sendMessage($chatId, $text, $parseMode);
+            return $telegramService->sendMessage($chatId, $text, $parseMode);
         } catch (\Throwable $exception) {
             Log::error('Failed to send Telegram message.', [
                 'error' => $exception->getMessage(),
@@ -304,13 +389,16 @@ class TelegramController extends Controller
         ];
     }
 
-    private function finalizeEventFromAction(AgentEvent $event, array $actionReply): void
-    {
+    private function finalizeEventFromAction(
+        AgentEventService $agentEventService,
+        AgentEvent $event,
+        array $actionReply
+    ): void {
         $status = $actionReply['status'] ?? 'completed';
         $result = $actionReply['result'] ?? [];
 
         if ($status !== 'completed') {
-            $this->agentEventService->markFailed(
+            $agentEventService->markFailed(
                 $event,
                 $status,
                 $actionReply['error_message'] ?? 'Action failed.',
@@ -320,7 +408,7 @@ class TelegramController extends Controller
             return;
         }
 
-        $this->agentEventService->markCompleted($event, $result);
+        $agentEventService->markCompleted($event, $result);
     }
 
     private function resolveUserName(array $payload): ?string

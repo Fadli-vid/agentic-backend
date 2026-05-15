@@ -80,6 +80,7 @@ class AgentActionService
 
         try {
             $response = Http::timeout(45)
+                ->withoutVerifying()
                 ->asJson()
                 ->post($webhookUrl, [
                     'source' => 'Telegram Kobi',

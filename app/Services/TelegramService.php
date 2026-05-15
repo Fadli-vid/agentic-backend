@@ -27,6 +27,7 @@ class TelegramService
 
         try {
             $response = Http::timeout(15)
+                ->withoutVerifying()
                 ->asJson()
                 ->post("https://api.telegram.org/bot{$token}/sendMessage", $payload);
         } catch (\Throwable $exception) {

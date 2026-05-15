@@ -63,6 +63,7 @@ class GeminiService
         );
 
         $response = Http::timeout(30)
+            ->withoutVerifying()
             ->acceptJson()
             ->asJson()
             ->post($url, [

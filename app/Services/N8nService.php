@@ -48,6 +48,7 @@ class N8nService
 
         try {
             $response = Http::timeout(60)
+                ->withoutVerifying()
                 ->asJson()
                 ->post($webhookUrl, $postPayload);
         } catch (\Throwable $exception) {

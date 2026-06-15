@@ -42,7 +42,7 @@ jobs:
         run: composer install --prefer-dist --no-interaction --no-progress
 
       - name: Copy environment file
-        run: cp env.txt .env
+        run: cp .env.example .env
 
       - name: Generate app key
         run: php artisan key:generate

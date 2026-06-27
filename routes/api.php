@@ -8,8 +8,13 @@ use App\Models\AgentEvent;
 use App\Models\Automation;
 use App\Models\Task;
 use App\Models\Expense;
+use App\Models\Goal;
+use App\Models\Habit;
+use App\Models\Memory;
 use App\Models\Reminder;
+use App\Models\StudyPlan;
 use App\Models\WorkflowRun;
+use App\Services\AnalyticsService;
 
 Route::get('/user', function (Request $request) {
     return $request->user();
@@ -43,6 +48,42 @@ Route::middleware('kobi.key')->group(function () {
 
     Route::get('/automations', function () {
         return Automation::latest()->get();
+    });
+
+    Route::get('/habits', function () {
+        return Habit::latest()->get();
+    });
+
+    Route::get('/goals', function () {
+        return Goal::latest()->get();
+    });
+
+    Route::get('/memories', function () {
+        return Memory::latest()->get();
+    });
+
+    Route::get('/study-plans', function () {
+        return StudyPlan::latest()->get();
+    });
+
+    Route::get('/analytics/dashboard', function (AnalyticsService $analyticsService) {
+        $result = $analyticsService->dashboardOverview();
+        return response()->json($result['ok'] ? $result['data'] : $result);
+    });
+
+    Route::get('/analytics/productivity-score', function (AnalyticsService $analyticsService) {
+        $result = $analyticsService->productivityScore();
+        return response()->json($result['ok'] ? $result['data'] : $result);
+    });
+
+    Route::get('/analytics/weekly-summary', function (AnalyticsService $analyticsService) {
+        $result = $analyticsService->weeklySummary();
+        return response()->json($result['ok'] ? $result['data'] : $result);
+    });
+
+    Route::get('/analytics/monthly-summary', function (AnalyticsService $analyticsService) {
+        $result = $analyticsService->monthlySummary();
+        return response()->json($result['ok'] ? $result['data'] : $result);
     });
 
     Route::patch('/automations/{automation}', function (Request $request, Automation $automation) {

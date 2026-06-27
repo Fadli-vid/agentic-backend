@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Jobs\TriggerN8nWorkflowJob;
 use App\Models\AgentEvent;
 use App\Models\Expense;
 use App\Models\Reminder;
@@ -13,8 +14,13 @@ use Illuminate\Support\Str;
 
 class AgentActionService
 {
-    public function __construct(private N8nService $n8nService)
-    {
+    public function __construct(
+        private N8nService $n8nService,
+        private GoalService $goalService,
+        private HabitService $habitService,
+        private StudyPlanService $studyPlanService,
+        private MemoryService $memoryService,
+    ) {
     }
 
     public function execute(array $aiData, ?AgentEvent $event = null): array
@@ -38,11 +44,11 @@ class AgentActionService
             'add_expense' => $this->handleAddExpense($aiData),
             'create_reminder' => $this->handleCreateReminder($aiData, $event),
             'trigger_workflow' => $this->handleTriggerWorkflow($aiData, $event),
-            'natural_command',
-            'goal_tracking',
-            'study_planner',
-            'habit_tracker',
-            'memory_update' => $this->handleAutomationFallback($aiData, $event),
+            'goal_tracking' => $this->handleGoalTracking($aiData, $event),
+            'study_planner' => $this->handleStudyPlanner($aiData, $event),
+            'habit_tracker' => $this->handleHabitTracker($aiData, $event),
+            'memory_update' => $this->handleMemoryUpdate($aiData, $event),
+            'natural_command' => $this->handleNaturalCommand($aiData, $event),
             'chat' => $this->reply($aiData['reply'] ?? 'Kobi siap bantu. Coba jelaskan lagi ya.'),
             default => $this->reply($aiData['reply'] ?? 'Kobi siap bantu. Coba jelaskan lagi ya.'),
         };
@@ -136,6 +142,10 @@ class AgentActionService
             'N8N webhook request failed.'
         );
     }
+
+    // -------------------------------------------------------------------------
+    //  Domain handlers — Database-first, N8N optional
+    // -------------------------------------------------------------------------
 
     private function handleAddTask(array $aiData): array
     {
@@ -273,15 +283,14 @@ class AgentActionService
             );
         }
 
-        $workflowPayload = [
+        // N8N is optional — dispatched asynchronously after DB persistence.
+        $this->dispatchN8n('create_reminder', 'reminder', [
             'reminder_id' => $reminder->id,
             'title' => $reminder->title,
             'description' => $reminder->description,
             'remind_at' => $remindAt?->toIso8601String(),
             'channel' => $reminder->channel,
-        ];
-
-        $workflowResult = $this->n8nService->triggerWorkflow('reminder', $workflowPayload, $event);
+        ], $event);
 
         return $this->reply(
             $aiData['reply'] ?? 'Siap, pengingatnya sudah Kobi catat.',
@@ -289,7 +298,7 @@ class AgentActionService
             'completed',
             [
                 'reminder_id' => $reminder->id,
-                'workflow' => $workflowResult,
+                'automation' => $this->automationMeta('reminder'),
             ]
         );
     }
@@ -327,12 +336,234 @@ class AgentActionService
         );
     }
 
-    private function handleAutomationFallback(array $aiData, ?AgentEvent $event): array
+    /**
+     * Handle goal_tracking — persist via GoalService, then async N8N.
+     */
+    private function handleGoalTracking(array $aiData, ?AgentEvent $event): array
     {
-        $workflow = $this->normalizeWorkflow($aiData);
+        $data = $this->normalizeData($aiData);
+        $title = $data['name'] !== '' ? $data['name'] : $data['description'];
 
+        if ($title === '') {
+            Log::warning('Kobi goal_tracking missing title.');
+            return $this->reply('Nama goal belum disebut. Coba ulang ya.', null, 'failed_action');
+        }
+
+        $result = $this->goalService->createGoal([
+            'title' => $title,
+            'description' => $data['description'] !== '' ? $data['description'] : null,
+            'priority' => $data['priority'] !== '' ? $data['priority'] : 'medium',
+        ]);
+
+        if (!$result['ok']) {
+            Log::error('Failed to create goal via GoalService.', [
+                'error' => $result['message'] ?? 'Unknown',
+            ]);
+
+            return $this->reply(
+                'Maaf, Kobi gagal menyimpan goal. Coba lagi ya.',
+                null,
+                'failed_action',
+                ['error' => $result['message'] ?? 'Unknown']
+            );
+        }
+
+        $goalId = $result['data']['goal']['id'] ?? null;
+
+        $this->dispatchN8n('goal_tracking', 'goal_tracking', [
+            'goal_id' => $goalId,
+            'title' => $title,
+        ], $event);
+
+        return $this->reply(
+            $aiData['reply'] ?? 'Goal sudah Kobi catat.',
+            null,
+            'completed',
+            [
+                'goal_id' => $goalId,
+                'automation' => $this->automationMeta('goal_tracking'),
+            ]
+        );
+    }
+
+    /**
+     * Handle habit_tracker — persist via HabitService, then async N8N.
+     */
+    private function handleHabitTracker(array $aiData, ?AgentEvent $event): array
+    {
+        $data = $this->normalizeData($aiData);
+        $name = $data['name'] !== '' ? $data['name'] : $data['description'];
+
+        if ($name === '') {
+            Log::warning('Kobi habit_tracker missing name.');
+            return $this->reply('Nama habit belum disebut. Coba ulang ya.', null, 'failed_action');
+        }
+
+        $result = $this->habitService->createHabit([
+            'name' => $name,
+            'description' => $data['description'] !== '' ? $data['description'] : null,
+        ]);
+
+        if (!$result['ok']) {
+            Log::error('Failed to create habit via HabitService.', [
+                'error' => $result['message'] ?? 'Unknown',
+            ]);
+
+            return $this->reply(
+                'Maaf, Kobi gagal menyimpan habit. Coba lagi ya.',
+                null,
+                'failed_action',
+                ['error' => $result['message'] ?? 'Unknown']
+            );
+        }
+
+        $habitId = $result['data']['habit']['id'] ?? null;
+
+        $this->dispatchN8n('habit_tracker', 'habit_tracker', [
+            'habit_id' => $habitId,
+            'name' => $name,
+        ], $event);
+
+        return $this->reply(
+            $aiData['reply'] ?? 'Habit sudah Kobi catat.',
+            null,
+            'completed',
+            [
+                'habit_id' => $habitId,
+                'automation' => $this->automationMeta('habit_tracker'),
+            ]
+        );
+    }
+
+    /**
+     * Handle study_planner — persist via StudyPlanService, then async N8N.
+     */
+    private function handleStudyPlanner(array $aiData, ?AgentEvent $event): array
+    {
+        $data = $this->normalizeData($aiData);
+        $subject = $data['name'] !== '' ? $data['name'] : $data['description'];
+
+        if ($subject === '') {
+            Log::warning('Kobi study_planner missing subject.');
+            return $this->reply('Nama mata pelajaran belum disebut. Coba ulang ya.', null, 'failed_action');
+        }
+
+        $result = $this->studyPlanService->createStudyPlan([
+            'subject' => $subject,
+            'description' => $data['description'] !== '' ? $data['description'] : null,
+            'notes' => $data['notes'] !== '' ? $data['notes'] : null,
+        ]);
+
+        if (!$result['ok']) {
+            Log::error('Failed to create study plan via StudyPlanService.', [
+                'error' => $result['message'] ?? 'Unknown',
+            ]);
+
+            return $this->reply(
+                'Maaf, Kobi gagal menyimpan rencana belajar. Coba lagi ya.',
+                null,
+                'failed_action',
+                ['error' => $result['message'] ?? 'Unknown']
+            );
+        }
+
+        $planId = $result['data']['study_plan']['id'] ?? null;
+
+        $this->dispatchN8n('study_planner', 'study_planner', [
+            'study_plan_id' => $planId,
+            'subject' => $subject,
+        ], $event);
+
+        return $this->reply(
+            $aiData['reply'] ?? 'Rencana belajar sudah Kobi catat.',
+            null,
+            'completed',
+            [
+                'study_plan_id' => $planId,
+                'automation' => $this->automationMeta('study_planner'),
+            ]
+        );
+    }
+
+    /**
+     * Handle memory_update — persist via MemoryService, then async N8N.
+     */
+    private function handleMemoryUpdate(array $aiData, ?AgentEvent $event): array
+    {
+        $data = $this->normalizeData($aiData);
+        $title = $data['name'] !== '' ? $data['name'] : $data['description'];
+        $content = $data['description'] !== '' ? $data['description'] : $data['name'];
+
+        if ($title === '' && $content === '') {
+            Log::warning('Kobi memory_update missing content.');
+            return $this->reply('Isi memori belum ada. Coba ulang ya.', null, 'failed_action');
+        }
+
+        $result = $this->memoryService->storeMemory([
+            'title' => $title !== '' ? $title : 'Untitled',
+            'content' => $content !== '' ? $content : $title,
+            'category' => $data['category'] !== '' ? $data['category'] : 'general',
+            'source' => 'agent',
+        ]);
+
+        if (!$result['ok']) {
+            Log::error('Failed to store memory via MemoryService.', [
+                'error' => $result['message'] ?? 'Unknown',
+            ]);
+
+            return $this->reply(
+                'Maaf, Kobi gagal menyimpan memori. Coba lagi ya.',
+                null,
+                'failed_action',
+                ['error' => $result['message'] ?? 'Unknown']
+            );
+        }
+
+        $memoryId = $result['data']['memory']['id'] ?? null;
+
+        $this->dispatchN8n('memory_update', 'memory_update', [
+            'memory_id' => $memoryId,
+            'title' => $title,
+        ], $event);
+
+        return $this->reply(
+            $aiData['reply'] ?? 'Memori sudah Kobi simpan.',
+            null,
+            'completed',
+            [
+                'memory_id' => $memoryId,
+                'automation' => $this->automationMeta('memory_update'),
+            ]
+        );
+    }
+
+    /**
+     * Handle natural_command — attempt lightweight domain resolution
+     * before falling back to a chat-like reply.
+     *
+     * If the AI response clearly represents a Goal, Habit, Reminder, Memory,
+     * or Study action, route it to the corresponding domain handler instead
+     * of replying as plain chat.
+     */
+    private function handleNaturalCommand(array $aiData, ?AgentEvent $event): array
+    {
+        $data = $this->normalizeData($aiData);
+        $workflow = $this->normalizeWorkflow($aiData);
+        $name = $data['name'] !== '' ? $data['name'] : $data['description'];
+
+        // Lightweight domain resolution: if AI provided structured data with a name,
+        // attempt to route to the appropriate domain handler based on workflow hints.
+        if ($name !== '' && $workflow['name'] !== '') {
+            $resolved = $this->resolveDomainFromWorkflow($workflow['name']);
+
+            if ($resolved !== null) {
+                return $this->execute(array_merge($aiData, ['action' => $resolved]), $event);
+            }
+        }
+
+        // Fallback: treat as chat with optional async N8N trigger.
         if ($workflow['name'] !== '') {
-            return $this->handleTriggerWorkflow($aiData, $event);
+            $this->dispatchN8n('natural_command', $workflow['name'], $workflow['payload'], $event);
         }
 
         return $this->reply(
@@ -341,9 +572,14 @@ class AgentActionService
             'completed',
             [
                 'payload' => $aiData['data'] ?? [],
+                'automation' => $workflow['name'] !== '' ? $this->automationMeta($workflow['name']) : null,
             ]
         );
     }
+
+    // -------------------------------------------------------------------------
+    //  Data normalization helpers
+    // -------------------------------------------------------------------------
 
     private function normalizeData(array $aiData): array
     {
@@ -375,6 +611,63 @@ class AgentActionService
         ];
     }
 
+    // -------------------------------------------------------------------------
+    //  N8N async dispatch helpers
+    // -------------------------------------------------------------------------
+
+    /**
+     * Fire-and-forget N8N workflow dispatch.
+     *
+     * Dispatched outside any database transaction. The job's internal
+     * try/catch ensures N8N failures never propagate to the caller.
+     */
+    private function dispatchN8n(string $action, string $workflowName, array $payload, ?AgentEvent $event): void
+    {
+        TriggerN8nWorkflowJob::dispatch($action, $workflowName, $payload, $event?->id);
+    }
+
+    /**
+     * Build standard automation metadata for domain responses.
+     *
+     * This metadata is informational only — it never changes the business status.
+     */
+    private function automationMeta(string $workflowName): array
+    {
+        return [
+            'attempted' => true,
+            'async' => true,
+            'workflow_name' => $workflowName,
+        ];
+    }
+
+    /**
+     * Map known workflow name patterns to domain actions for natural_command resolution.
+     */
+    private function resolveDomainFromWorkflow(string $workflowName): ?string
+    {
+        $map = [
+            'goal' => 'goal_tracking',
+            'habit' => 'habit_tracker',
+            'study' => 'study_planner',
+            'memory' => 'memory_update',
+            'remind' => 'create_reminder',
+        ];
+
+        $lower = strtolower($workflowName);
+
+        foreach ($map as $keyword => $action) {
+            if (str_contains($lower, $keyword)) {
+                return $action;
+            }
+        }
+
+        return null;
+    }
+
+    // -------------------------------------------------------------------------
+    //  URL validation helpers
+    // -------------------------------------------------------------------------
+
     private function looksLikeDoubleUrl(string $url): bool
     {
         $count = substr_count($url, 'http://') + substr_count($url, 'https://');
@@ -402,6 +695,10 @@ class AgentActionService
 
         return $scheme . '://' . $host . $port . $path;
     }
+
+    // -------------------------------------------------------------------------
+    //  Reply builder
+    // -------------------------------------------------------------------------
 
     private function reply(
         string $text,

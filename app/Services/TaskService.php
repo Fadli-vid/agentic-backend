@@ -40,6 +40,64 @@ class TaskService
     }
 
     /**
+     * Resolve a task via staged fuzzy matching.
+     */
+    public function resolveTask(string $query): \App\DTOs\TaskResolutionResult
+    {
+        $query = trim($query);
+        if ($query === '') {
+            return new \App\DTOs\TaskResolutionResult(null, collect(), false, 0);
+        }
+
+        // 1. Exact Match (Score 100)
+        $exact = Task::where('name', $query)->get();
+        if ($exact->count() === 1) {
+            return new \App\DTOs\TaskResolutionResult($exact->first(), $exact, false, 100);
+        }
+        if ($exact->count() > 1) {
+            return new \App\DTOs\TaskResolutionResult(null, $exact, true, 100);
+        }
+
+        // 2. Case Insensitive (Score 95)
+        $caseInsensitive = Task::where('name', 'ilike', $query)->get();
+        if ($caseInsensitive->count() === 1) {
+            return new \App\DTOs\TaskResolutionResult($caseInsensitive->first(), $caseInsensitive, false, 95);
+        }
+        if ($caseInsensitive->count() > 1) {
+            return new \App\DTOs\TaskResolutionResult(null, $caseInsensitive, true, 95);
+        }
+
+        // 3. Trimmed Match (Score 90) - handled by exact and case-insensitive since we trim
+
+        // 4. ILIKE / Partial Match (Score 80)
+        $partial = Task::where('name', 'ilike', '%' . $query . '%')->get();
+        if ($partial->count() === 1) {
+            return new \App\DTOs\TaskResolutionResult($partial->first(), $partial, false, 80);
+        }
+        if ($partial->count() > 1) {
+            return new \App\DTOs\TaskResolutionResult(null, $partial, true, 80);
+        }
+
+        // 5. Contains Match using split words (Score 70)
+        $words = explode(' ', $query);
+        $containsQuery = Task::query();
+        foreach ($words as $word) {
+            if (trim($word) !== '') {
+                $containsQuery->where('name', 'ilike', '%' . trim($word) . '%');
+            }
+        }
+        $contains = $containsQuery->get();
+        if ($contains->count() === 1) {
+            return new \App\DTOs\TaskResolutionResult($contains->first(), $contains, false, 70);
+        }
+        if ($contains->count() > 1) {
+            return new \App\DTOs\TaskResolutionResult(null, $contains, true, 70);
+        }
+
+        return new \App\DTOs\TaskResolutionResult(null, collect(), false, 0);
+    }
+
+    /**
      * Create a new task safely.
      */
     public function createTask(TaskData $data): Task
@@ -67,20 +125,24 @@ class TaskService
     public function updateTask(Task $task, TaskData $data): Task
     {
         return DB::transaction(function () use ($task, $data) {
-            $task->name = $data->name;
-            if ($data->description !== null) {
+            if ($data->isProvided('name')) {
+                $task->name = $data->name;
+            }
+            if ($data->isProvided('description')) {
                 $task->description = $data->description;
             }
-            if ($data->deadline_at !== null) {
+            if ($data->isProvided('deadline_at')) {
                 $task->deadline_at = $data->deadline_at;
             }
-            if ($data->priority !== null) {
+            if ($data->isProvided('priority')) {
                 $task->priority = $data->priority;
             }
 
-            if ($data->status !== null && $data->status !== $task->status) {
-                $this->applyTimestampLogic($task, $data->status, $task->status);
-                $task->status = $data->status;
+            if ($data->isProvided('status') && $data->status !== $task->status) {
+                // Determine new status; if null passed explicitly, this is unusual but maybe fallback to pending
+                $newStatus = $data->status ?? Task::STATUS_PENDING;
+                $this->applyTimestampLogic($task, $newStatus, $task->status);
+                $task->status = $newStatus;
             }
 
             $task->save();

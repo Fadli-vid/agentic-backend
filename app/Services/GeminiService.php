@@ -45,25 +45,28 @@ class GeminiService
             . ' "action": "chat | create_task | add_task | update_task | delete_task | update_status | update_priority | update_deadline | search_task | add_expense | create_reminder | trigger_workflow | natural_command | goal_tracking | study_planner | habit_tracker | memory_update",'
             . ' "reply": "Balasan natural untuk user",'
             . ' "data": {'
-            . '   "name": "",'
-            . '   "description": "",'
-            . '   "status": "",'
+            . '   "target_task": "nama tugas yang ingin dicari/diubah/dihapus",'
+            . '   "name": "nama tugas baru (jika ingin mengubah judul, atau membuat baru)",'
+            . '   "description": "...",'
+            . '   "status": "...",'
             . '   "amount": 0,'
-            . '   "category": "",'
-            . '   "datetime": "",'
-            . '   "priority": "",'
-            . '   "notes": ""'
+            . '   "category": "...",'
+            . '   "datetime": "...",'
+            . '   "priority": "...",'
+            . '   "notes": "..."'
             . ' },'
             . ' "workflow": {'
             . '   "name": "",'
             . '   "payload": {}'
             . ' }'
             . ' }'
-            . ' Aturan: jika user hanya ngobrol, action chat. Jika mencatat/membuat tugas, action create_task atau add_task. Untuk mengubah status tugas, action update_status. Mengubah prioritas tugas, action update_priority. Mengubah deadline, action update_deadline.'
-            . ' PENTING: Lakukan normalisasi nilai secara ketat! Untuk tanggal/waktu (seperti "besok", "jumat", "minggu depan"), konversi menjadi format YYYY-MM-DD. Untuk status (seperti "start working", "selesai"), konversi ke enum: "pending", "in_progress", atau "completed". Untuk prioritas (seperti "tinggi", "rendah"), konversi ke enum: "low", "medium", atau "high".'
+            . ' Aturan: jika user hanya ngobrol, action chat. Jika mencatat/membuat tugas, action create_task. Untuk menghapus tugas, action delete_task. Untuk mencari tugas, action search_task.'
+            . ' Jika mengubah satu atau lebih field dari sebuah tugas (seperti mengganti nama, prioritas, dan deadline sekaligus), gunakan action update_task. Jika spesifik hanya status/priority/deadline, boleh gunakan update_status/update_priority/update_deadline.'
+            . ' PENTING: Wajib sertakan "target_task" untuk operasi update/delete/search.'
+            . ' PENTING: Hanya masukkan key di dalam "data" jika user memintanya untuk diubah. Jika user meminta MENGHAPUS suatu nilai (contoh: "hapus deskripsi", "belum selesai"), isi key tersebut dengan null atau string kosong "".'
+            . ' Lakukan normalisasi nilai secara ketat! Untuk tanggal/waktu, konversi menjadi format YYYY-MM-DD. Untuk status, konversi ke enum: "pending", "in_progress", atau "completed". Untuk prioritas, konversi ke enum: "low", "medium", atau "high".'
             . ' Jika mencatat pengeluaran, action add_expense. Jika meminta pengingat, action create_reminder.'
-            . ' Jika meminta automation seperti daily summary, weekly review, budget alert, study planner, habit follow-up, atau proactive suggestion,'
-            . ' gunakan trigger_workflow dengan workflow.name yang sesuai.';
+            . ' Jika meminta automation, gunakan trigger_workflow dengan workflow.name yang sesuai.';
 
         $url = sprintf(
             'https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s',
@@ -167,20 +170,45 @@ class GeminiService
         $workflowPayload = $workflow['payload'] ?? [];
         $workflowPayload = is_array($workflowPayload) ? $workflowPayload : [];
 
+        $normalizedData = [];
+        if (array_key_exists('target_task', $data)) {
+            $normalizedData['target_task'] = $data['target_task'] === null ? null : trim((string) $data['target_task']);
+        }
+        if (array_key_exists('name', $data)) {
+            $normalizedData['name'] = $data['name'] === null ? null : trim((string) $data['name']);
+        } elseif ($dataNameFallback !== '') {
+            $normalizedData['name'] = $dataNameFallback;
+        }
+
+        if (array_key_exists('description', $data)) {
+            $normalizedData['description'] = $data['description'] === null ? null : trim((string) $data['description']);
+        }
+        if (array_key_exists('status', $data)) {
+            $normalizedData['status'] = $data['status'] === null ? null : trim((string) $data['status']);
+        }
+        if (array_key_exists('amount', $data) || $dataAmountFallback !== 0) {
+            $normalizedData['amount'] = $data['amount'] ?? $dataAmountFallback;
+        }
+        if (array_key_exists('category', $data)) {
+            $normalizedData['category'] = $data['category'] === null ? null : trim((string) $data['category']);
+        }
+        if (array_key_exists('datetime', $data)) {
+            $normalizedData['deadline_at'] = $data['datetime'] === null ? null : trim((string) $data['datetime']);
+        } elseif (array_key_exists('deadline_at', $data)) {
+            $normalizedData['deadline_at'] = $data['deadline_at'] === null ? null : trim((string) $data['deadline_at']);
+        }
+        if (array_key_exists('priority', $data)) {
+            $normalizedData['priority'] = $data['priority'] === null ? null : trim((string) $data['priority']);
+        }
+        if (array_key_exists('notes', $data)) {
+            $normalizedData['notes'] = $data['notes'] === null ? null : trim((string) $data['notes']);
+        }
+
         return [
             'ok' => true,
             'action' => $action,
             'reply' => $reply !== '' ? $reply : 'Kobi agak bingung sama pesanmu tadi.',
-            'data' => [
-                'name' => trim((string) ($data['name'] ?? $dataNameFallback)),
-                'description' => trim((string) ($data['description'] ?? '')),
-                'status' => trim((string) ($data['status'] ?? '')),
-                'amount' => $data['amount'] ?? $dataAmountFallback,
-                'category' => trim((string) ($data['category'] ?? '')),
-                'datetime' => trim((string) ($data['datetime'] ?? '')),
-                'priority' => trim((string) ($data['priority'] ?? '')),
-                'notes' => trim((string) ($data['notes'] ?? '')),
-            ],
+            'data' => $normalizedData,
             'workflow' => [
                 'name' => $workflowName,
                 'payload' => $workflowPayload,

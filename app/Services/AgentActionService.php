@@ -42,6 +42,9 @@ class AgentActionService
 
         return match ($action) {
             'add_task', 'create_task' => $this->handleAddTask($aiData),
+            'update_task', 'update_status', 'update_priority', 'update_deadline', 'update_title', 'update_description' => $this->handleUpdateTask($aiData, $action),
+            'delete_task' => $this->handleDeleteTask($aiData),
+            'search_task' => $this->handleSearchTask($aiData),
             'add_expense' => $this->handleAddExpense($aiData),
             'create_reminder' => $this->handleCreateReminder($aiData, $event),
             'trigger_workflow' => $this->handleTriggerWorkflow($aiData, $event),
@@ -150,22 +153,20 @@ class AgentActionService
 
     private function handleAddTask(array $aiData): array
     {
-        $data = $this->normalizeData($aiData);
-        $name = $data['name'] !== '' ? $data['name'] : $data['description'];
-
-        if ($name === '') {
-            Log::warning('Kobi add_task missing name.');
-            return $this->reply('Nama tugasnya belum disebut. Coba ulang dengan lebih jelas ya.', null, 'failed_action');
+        $taskData = \App\DTOs\TaskData::fromAI($aiData['data'] ?? []);
+        
+        if (!$taskData->has('name')) {
+            // Fallback to description if name is not provided (legacy support)
+            if ($taskData->has('description')) {
+                $aiData['data']['name'] = $taskData->description;
+                $taskData = \App\DTOs\TaskData::fromAI($aiData['data']);
+            } else {
+                Log::warning('Kobi add_task missing name.');
+                return $this->reply('Nama tugasnya belum disebut. Coba ulang dengan lebih jelas ya.', null, 'failed_action');
+            }
         }
 
         try {
-            $taskData = new \App\DTOs\TaskData(
-                name: $name,
-                description: $data['description'] !== '' ? $data['description'] : null,
-                status: !empty($data['status']) ? $data['status'] : null,
-                priority: !empty($data['priority']) ? $data['priority'] : null,
-                deadline_at: $data['datetime'] !== '' ? $data['datetime'] : null
-            );
             $task = $this->taskService->createTask($taskData);
         } catch (\Throwable $exception) {
             Log::error('Failed to create task.', [
@@ -190,6 +191,120 @@ class AgentActionService
                 'task_id' => $task->id,
             ]
         );
+    }
+
+    private function handleUpdateTask(array $aiData, string $action): array
+    {
+        $taskData = \App\DTOs\TaskData::fromAI($aiData['data'] ?? []);
+        $targetName = $aiData['data']['target_task'] ?? $taskData->name;
+
+        if (empty($targetName)) {
+            Log::warning("Kobi {$action} missing target task name.");
+            return $this->reply('Kobi butuh nama tugas yang mau diubah. Coba sebutkan nama tugasnya ya.', null, 'failed_action');
+        }
+
+        $resolution = $this->taskService->resolveTask($targetName);
+
+        if ($resolution->resolvedTask === null) {
+            if ($resolution->isAmbiguous) {
+                $matches = $resolution->candidateMatches->pluck('name')->map(fn($n, $i) => ($i + 1) . '. ' . $n)->join("\n");
+                return $this->reply(
+                    "Kobi menemukan beberapa tugas yang mirip nih:\n{$matches}\n\nYang mana yang mau diubah?",
+                    null,
+                    'clarification_needed'
+                );
+            }
+            return $this->reply("Tugas '{$targetName}' tidak ditemukan. Coba cek lagi namanya ya.", null, 'failed_action');
+        }
+
+        // To support changing the name itself, we remove 'name' from TaskData if it matches the target task name exactly
+        // Wait, Gemini provides target_task in name, and if it wants to change the title, it might be tricky.
+        // For Phase 1, we assume 'name' in $aiData['data'] is the target task. If they want to rename, maybe we don't support renaming via same field or we just don't update name unless explicitly specified in a different field.
+        // Let's prevent 'name' from overwriting the matched task name unless it's different.
+        // Actually, for now, we just pass the DTO to updateTask. If name is provided, it updates it.
+        
+        try {
+            $oldValues = $resolution->resolvedTask->toArray();
+            $task = $this->taskService->updateTask($resolution->resolvedTask, $taskData);
+            
+            Log::info("Task mutated successfully.", [
+                'action' => $action,
+                'task_id' => $task->id,
+                'old' => $oldValues,
+                'new' => $task->toArray()
+            ]);
+        } catch (\Throwable $exception) {
+            Log::error('Failed to update task.', [
+                'error' => $exception->getMessage(),
+            ]);
+
+            return $this->reply(
+                'Maaf, Kobi gagal mengubah tugasnya. Coba lagi ya.',
+                null,
+                'failed_action',
+                ['error' => $exception->getMessage()]
+            );
+        }
+
+        return $this->reply(
+            $aiData['reply'] ?? 'Oke, tugasnya sudah Kobi perbarui.',
+            null,
+            'completed',
+            ['task_id' => $task->id]
+        );
+    }
+
+    private function handleDeleteTask(array $aiData): array
+    {
+        $taskData = \App\DTOs\TaskData::fromAI($aiData['data'] ?? []);
+        $targetName = $aiData['data']['target_task'] ?? $taskData->name;
+
+        if (empty($targetName)) {
+            return $this->reply('Kobi butuh nama tugas yang mau dihapus. Coba sebutkan nama tugasnya ya.', null, 'failed_action');
+        }
+
+        $resolution = $this->taskService->resolveTask($targetName);
+
+        if ($resolution->resolvedTask === null) {
+            if ($resolution->isAmbiguous) {
+                return $this->reply("Ada beberapa tugas yang mirip. Tolong sebutkan lebih spesifik ya.", null, 'clarification_needed');
+            }
+            return $this->reply("Tugas '{$targetName}' tidak ditemukan.", null, 'failed_action');
+        }
+
+        try {
+            $this->taskService->deleteTask($resolution->resolvedTask);
+        } catch (\Throwable $exception) {
+            return $this->reply('Gagal menghapus tugas. Coba lagi ya.', null, 'failed_action');
+        }
+
+        return $this->reply($aiData['reply'] ?? 'Tugas berhasil dihapus.', null, 'completed');
+    }
+
+    private function handleSearchTask(array $aiData): array
+    {
+        $taskData = \App\DTOs\TaskData::fromAI($aiData['data'] ?? []);
+        $targetName = $aiData['data']['target_task'] ?? $taskData->name;
+
+        if (empty($targetName)) {
+            return $this->reply('Cari tugas apa nih? Sebutkan namanya ya.', null, 'failed_action');
+        }
+
+        $resolution = $this->taskService->resolveTask($targetName);
+
+        if ($resolution->resolvedTask === null) {
+            if ($resolution->isAmbiguous) {
+                $matches = $resolution->candidateMatches->pluck('name')->map(fn($n, $i) => ($i + 1) . '. ' . $n)->join("\n");
+                return $this->reply("Kobi menemukan beberapa tugas nih:\n{$matches}", null, 'completed');
+            }
+            return $this->reply("Tugas '{$targetName}' tidak ditemukan.", null, 'failed_action');
+        }
+
+        $task = $resolution->resolvedTask;
+        $status = $task->status === 'completed' ? 'Selesai' : ($task->status === 'in_progress' ? 'Sedang Dikerjakan' : 'Belum Mulai');
+        $reply = "Ini detail tugasnya:\n- Nama: {$task->name}\n- Status: {$status}\n- Prioritas: {$task->priority}\n- Deadline: " . ($task->deadline_at ?? 'Tidak ada');
+
+        return $this->reply($reply, null, 'completed', ['task_id' => $task->id]);
     }
 
     private function handleAddExpense(array $aiData): array

@@ -4,8 +4,13 @@ namespace App\Services;
 
 use App\DTOs\TaskData;
 use App\Models\Task;
+use App\Events\TaskCreated;
+use App\Events\TaskUpdated;
+use App\Events\TaskDeleted;
+use App\Events\TaskStatusChanged;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Pagination\LengthAwarePaginator;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 
 class TaskService
 {
@@ -49,6 +54,8 @@ class TaskService
             return new \App\DTOs\TaskResolutionResult(null, collect(), false, 0);
         }
 
+        $likeOperator = DB::connection()->getDriverName() === 'pgsql' ? 'ilike' : 'like';
+
         // 1. Exact Match (Score 100)
         $exact = Task::where('name', $query)->get();
         if ($exact->count() === 1) {
@@ -59,7 +66,7 @@ class TaskService
         }
 
         // 2. Case Insensitive (Score 95)
-        $caseInsensitive = Task::where('name', 'ilike', $query)->get();
+        $caseInsensitive = Task::where('name', $likeOperator, $query)->get();
         if ($caseInsensitive->count() === 1) {
             return new \App\DTOs\TaskResolutionResult($caseInsensitive->first(), $caseInsensitive, false, 95);
         }
@@ -70,7 +77,7 @@ class TaskService
         // 3. Trimmed Match (Score 90) - handled by exact and case-insensitive since we trim
 
         // 4. ILIKE / Partial Match (Score 80)
-        $partial = Task::where('name', 'ilike', '%' . $query . '%')->get();
+        $partial = Task::where('name', $likeOperator, '%' . $query . '%')->get();
         if ($partial->count() === 1) {
             return new \App\DTOs\TaskResolutionResult($partial->first(), $partial, false, 80);
         }
@@ -83,7 +90,7 @@ class TaskService
         $containsQuery = Task::query();
         foreach ($words as $word) {
             if (trim($word) !== '') {
-                $containsQuery->where('name', 'ilike', '%' . trim($word) . '%');
+                $containsQuery->where('name', $likeOperator, '%' . trim($word) . '%');
             }
         }
         $contains = $containsQuery->get();
@@ -102,6 +109,7 @@ class TaskService
      */
     public function createTask(TaskData $data): Task
     {
+        Log::info('Transaction Started: createTask', ['action' => 'create_task']);
         return DB::transaction(function () use ($data) {
             $task = new Task([
                 'name' => $data->name,
@@ -115,6 +123,15 @@ class TaskService
             $this->applyTimestampLogic($task, $task->status, null);
             
             $task->save();
+            
+            Log::info('Transaction Committed: createTask', [
+                'action' => 'create_task',
+                'task_id' => $task->id,
+                'new_values' => $task->toArray(),
+            ]);
+            
+            TaskCreated::dispatch($task);
+            
             return $task;
         });
     }
@@ -124,7 +141,10 @@ class TaskService
      */
     public function updateTask(Task $task, TaskData $data): Task
     {
+        Log::info('Transaction Started: updateTask', ['action' => 'update_task', 'task_id' => $task->id]);
         return DB::transaction(function () use ($task, $data) {
+            $oldValues = $task->toArray();
+            
             if ($data->isProvided('name')) {
                 $task->name = $data->name;
             }
@@ -138,14 +158,38 @@ class TaskService
                 $task->priority = $data->priority;
             }
 
+            $statusChanged = false;
+            $oldStatus = $task->status;
+            
             if ($data->isProvided('status') && $data->status !== $task->status) {
                 // Determine new status; if null passed explicitly, this is unusual but maybe fallback to pending
                 $newStatus = $data->status ?? Task::STATUS_PENDING;
                 $this->applyTimestampLogic($task, $newStatus, $task->status);
                 $task->status = $newStatus;
+                $statusChanged = true;
             }
 
-            $task->save();
+            if ($task->isDirty()) {
+                $changedColumns = $task->getDirty();
+                $task->save();
+                
+                Log::info('Transaction Committed: updateTask', [
+                    'action' => 'update_task',
+                    'task_id' => $task->id,
+                    'old_values' => $oldValues,
+                    'new_values' => $task->toArray(),
+                    'changed_columns' => $changedColumns,
+                ]);
+                
+                TaskUpdated::dispatch($task);
+                
+                if ($statusChanged) {
+                    TaskStatusChanged::dispatch($task, $oldStatus, $task->status);
+                }
+            } else {
+                Log::info('Transaction Committed: updateTask (No changes)', ['action' => 'update_task', 'task_id' => $task->id]);
+            }
+
             return $task;
         });
     }
@@ -155,11 +199,30 @@ class TaskService
      */
     public function updateStatus(Task $task, string $newStatus): Task
     {
+        Log::info('Transaction Started: updateStatus', ['action' => 'update_status', 'task_id' => $task->id]);
         return DB::transaction(function () use ($task, $newStatus) {
             if ($task->status !== $newStatus) {
+                $oldValues = $task->toArray();
+                $oldStatus = $task->status;
+                
                 $this->applyTimestampLogic($task, $newStatus, $task->status);
                 $task->status = $newStatus;
+                
+                $changedColumns = $task->getDirty();
                 $task->save();
+                
+                Log::info('Transaction Committed: updateStatus', [
+                    'action' => 'update_status',
+                    'task_id' => $task->id,
+                    'old_values' => $oldValues,
+                    'new_values' => $task->toArray(),
+                    'changed_columns' => $changedColumns,
+                ]);
+                
+                TaskUpdated::dispatch($task);
+                TaskStatusChanged::dispatch($task, $oldStatus, $newStatus);
+            } else {
+                Log::info('Transaction Committed: updateStatus (No changes)', ['action' => 'update_status', 'task_id' => $task->id]);
             }
             return $task;
         });
@@ -170,8 +233,25 @@ class TaskService
      */
     public function updatePriority(Task $task, string $newPriority): Task
     {
-        $task->update(['priority' => $newPriority]);
-        return $task;
+        // For consistency, convert to transaction with logging even though it's one field
+        Log::info('Transaction Started: updatePriority', ['action' => 'update_priority', 'task_id' => $task->id]);
+        return DB::transaction(function () use ($task, $newPriority) {
+            $oldValues = $task->toArray();
+            if ($task->priority !== $newPriority) {
+                $task->update(['priority' => $newPriority]);
+                Log::info('Transaction Committed: updatePriority', [
+                    'action' => 'update_priority',
+                    'task_id' => $task->id,
+                    'old_values' => $oldValues,
+                    'new_values' => $task->toArray(),
+                    'changed_columns' => ['priority'],
+                ]);
+                TaskUpdated::dispatch($task);
+            } else {
+                Log::info('Transaction Committed: updatePriority (No changes)', ['action' => 'update_priority', 'task_id' => $task->id]);
+            }
+            return $task;
+        });
     }
 
     /**
@@ -179,8 +259,24 @@ class TaskService
      */
     public function updateDeadline(Task $task, ?string $newDeadline): Task
     {
-        $task->update(['deadline_at' => $newDeadline]);
-        return $task;
+        Log::info('Transaction Started: updateDeadline', ['action' => 'update_deadline', 'task_id' => $task->id]);
+        return DB::transaction(function () use ($task, $newDeadline) {
+            $oldValues = $task->toArray();
+            if ($task->deadline_at !== $newDeadline) {
+                $task->update(['deadline_at' => $newDeadline]);
+                Log::info('Transaction Committed: updateDeadline', [
+                    'action' => 'update_deadline',
+                    'task_id' => $task->id,
+                    'old_values' => $oldValues,
+                    'new_values' => $task->toArray(),
+                    'changed_columns' => ['deadline_at'],
+                ]);
+                TaskUpdated::dispatch($task);
+            } else {
+                Log::info('Transaction Committed: updateDeadline (No changes)', ['action' => 'update_deadline', 'task_id' => $task->id]);
+            }
+            return $task;
+        });
     }
 
     /**
@@ -188,7 +284,23 @@ class TaskService
      */
     public function deleteTask(Task $task): bool
     {
-        return DB::transaction(fn() => $task->delete());
+        Log::info('Transaction Started: deleteTask', ['action' => 'delete_task', 'task_id' => $task->id]);
+        return DB::transaction(function () use ($task) {
+            $taskId = $task->id;
+            $oldValues = $task->toArray();
+            $deleted = $task->delete();
+            
+            if ($deleted) {
+                Log::info('Transaction Committed: deleteTask', [
+                    'action' => 'delete_task',
+                    'task_id' => $taskId,
+                    'old_values' => $oldValues,
+                ]);
+                TaskDeleted::dispatch($taskId);
+            }
+            
+            return (bool) $deleted;
+        });
     }
 
     /**

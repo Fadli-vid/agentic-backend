@@ -71,35 +71,66 @@ class GeminiService
             $apiKey
         );
 
-        $response = Http::timeout(30)
-            ->withoutVerifying()
-            ->acceptJson()
-            ->asJson()
-            ->post($url, [
-                'contents' => [[
-                    'parts' => [[
-                        'text' => $text,
+        $startTime = microtime(true);
+
+        try {
+            $response = Http::timeout(60)
+                ->connectTimeout(15)
+                ->retry(3, 1000)
+                ->withoutVerifying()
+                ->acceptJson()
+                ->asJson()
+                ->post($url, [
+                    'contents' => [[
+                        'parts' => [[
+                            'text' => $text,
+                        ]],
                     ]],
-                ]],
-                'system_instruction' => [
-                    'parts' => [[
-                        'text' => $systemPrompt,
-                    ]],
-                ],
-                'generationConfig' => [
-                    'response_mime_type' => 'application/json',
-                ],
+                    'system_instruction' => [
+                        'parts' => [[
+                            'text' => $systemPrompt,
+                        ]],
+                    ],
+                    'generationConfig' => [
+                        'response_mime_type' => 'application/json',
+                    ],
+                ]);
+        } catch (\Illuminate\Http\Client\ConnectionException $e) {
+            $elapsedMs = round((microtime(true) - $startTime) * 1000, 2);
+            Log::error('Gemini connection exception (timeout/connect).', [
+                'error' => $e->getMessage(),
+                'elapsed_ms' => $elapsedMs,
             ]);
+            return $this->fallback('Maaf, Kobi tidak bisa terhubung ke Gemini karena koneksi terputus (timeout). Coba lagi nanti ya.', 'failed_ai_timeout');
+        } catch (\Throwable $e) {
+            $elapsedMs = round((microtime(true) - $startTime) * 1000, 2);
+            Log::error('Gemini request exception.', [
+                'error' => $e->getMessage(),
+                'elapsed_ms' => $elapsedMs,
+            ]);
+            return $this->fallback('Maaf, Kobi mengalami masalah saat menghubungi Gemini. Coba lagi nanti ya.', 'failed_ai_exception');
+        }
+
+        $elapsedMs = round((microtime(true) - $startTime) * 1000, 2);
 
         if (!$response->successful()) {
             Log::warning('Gemini API request failed.', [
                 'status' => $response->status(),
+                'elapsed_ms' => $elapsedMs,
             ]);
 
             return $this->fallback('Maaf, Kobi sedang mengalami gangguan dari Gemini. Coba lagi sebentar ya.', 'failed_ai');
         }
 
-        $rawText = data_get($response->json(), 'candidates.0.content.parts.0.text');
+        $json = $response->json();
+        
+        Log::info('Gemini response received.', [
+            'elapsed_ms' => $elapsedMs,
+            'finishReason' => data_get($json, 'candidates.0.finishReason'),
+            'usageMetadata' => data_get($json, 'usageMetadata'),
+        ]);
+
+        $rawText = data_get($json, 'candidates.0.content.parts.0.text');
 
         if (!is_string($rawText)) {
             Log::warning('Gemini response missing text.');

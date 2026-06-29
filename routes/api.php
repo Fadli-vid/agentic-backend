@@ -26,9 +26,8 @@ Route::post('/internal/n8n-result', [N8nController::class, 'handleResult'])
     ->middleware('n8n.key');
 
 Route::middleware('kobi.key')->group(function () {
-    Route::get('/tasks', function () {
-        return Task::latest()->get(); // Mengambil semua tugas dari yang terbaru
-    });
+    Route::get('/tasks/statistics', [\App\Http\Controllers\TaskController::class, 'statistics']);
+    Route::apiResource('tasks', \App\Http\Controllers\TaskController::class)->except(['show']);
 
     Route::get('/expenses', function () {
         return Expense::latest()->get(); // Mengambil semua pengeluaran dari yang terbaru
@@ -100,21 +99,7 @@ Route::middleware('kobi.key')->group(function () {
         return response()->json($automation);
     });
 
-    Route::match(['put', 'patch'], '/tasks/{task}', function (Request $request, Task $task) {
-        $data = $request->validate([
-            'is_completed' => ['required', 'boolean'],
-        ]);
 
-        $task->update($data);
-
-        return response()->json($task);
-    });
-
-    Route::delete('/tasks/{task}', function (Task $task) {
-        $task->delete();
-
-        return response()->json(['deleted' => true]);
-    });
 
     Route::delete('/expenses/{expense}', function (Expense $expense) {
         $expense->delete();

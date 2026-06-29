@@ -20,6 +20,7 @@ class AgentActionService
         private HabitService $habitService,
         private StudyPlanService $studyPlanService,
         private MemoryService $memoryService,
+        private TaskService $taskService,
     ) {
     }
 
@@ -40,7 +41,7 @@ class AgentActionService
         ]);
 
         return match ($action) {
-            'add_task' => $this->handleAddTask($aiData),
+            'add_task', 'create_task' => $this->handleAddTask($aiData),
             'add_expense' => $this->handleAddExpense($aiData),
             'create_reminder' => $this->handleCreateReminder($aiData, $event),
             'trigger_workflow' => $this->handleTriggerWorkflow($aiData, $event),
@@ -158,10 +159,14 @@ class AgentActionService
         }
 
         try {
-            $task = Task::create([
-                'name' => $name,
-                'is_completed' => false,
-            ]);
+            $taskData = new \App\DTOs\TaskData(
+                name: $name,
+                description: $data['description'] !== '' ? $data['description'] : null,
+                status: $data['status'] !== '' ? $data['status'] : \App\Models\Task::STATUS_PENDING,
+                priority: $data['priority'] !== '' ? $data['priority'] : \App\Models\Task::PRIORITY_MEDIUM,
+                deadline_at: $data['datetime'] !== '' ? $data['datetime'] : null
+            );
+            $task = $this->taskService->createTask($taskData);
         } catch (\Throwable $exception) {
             Log::error('Failed to create task.', [
                 'error' => $exception->getMessage(),

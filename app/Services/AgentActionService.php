@@ -162,8 +162,8 @@ class AgentActionService
             $taskData = new \App\DTOs\TaskData(
                 name: $name,
                 description: $data['description'] !== '' ? $data['description'] : null,
-                status: $data['status'] !== '' ? $data['status'] : \App\Models\Task::STATUS_PENDING,
-                priority: $data['priority'] !== '' ? $data['priority'] : \App\Models\Task::PRIORITY_MEDIUM,
+                status: !empty($data['status']) ? $data['status'] : null,
+                priority: !empty($data['priority']) ? $data['priority'] : null,
                 deadline_at: $data['datetime'] !== '' ? $data['datetime'] : null
             );
             $task = $this->taskService->createTask($taskData);
@@ -357,7 +357,7 @@ class AgentActionService
         $result = $this->goalService->createGoal([
             'title' => $title,
             'description' => $data['description'] !== '' ? $data['description'] : null,
-            'priority' => $data['priority'] !== '' ? $data['priority'] : 'medium',
+            'priority' => !empty($data['priority']) ? $data['priority'] : 'medium',
         ]);
 
         if (!$result['ok']) {
@@ -598,6 +598,7 @@ class AgentActionService
             'category' => trim((string) ($data['category'] ?? '')),
             'datetime' => trim((string) ($data['datetime'] ?? '')),
             'priority' => trim((string) ($data['priority'] ?? '')),
+            'status' => trim((string) ($data['status'] ?? '')),
             'notes' => trim((string) ($data['notes'] ?? '')),
         ];
     }
